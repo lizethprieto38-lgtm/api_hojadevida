@@ -5,6 +5,58 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+@app.route("/inicio_secundario")
+def inicio_secundario():
+
+    return "API Hoja de vida funcionando"
+
+@app.route("/api/registro-usuario", methods=["POST"])
+def registro_usuario():
+
+    datos = request.get_json()
+
+    nombre = datos.get("nombre")
+    correo = datos.get("correo")
+    password = datos.get("password")
+    rol = datos.get("rol", "aprendiz")
+    estado = datos.get("estado", 1)   # número, no texto
+
+    if not nombre or not correo or not password:
+        return {
+            "mensaje": "Faltan datos obligatorios"
+        }, 400
+
+    conexion = conectar_bd()
+    cursor = conexion.cursor()
+
+    sql = """
+        INSERT INTO usuarios
+        (nombre, correo, password, rol, estado, fecha_creacion)
+        VALUES (%s, %s, %s, %s, %s, NOW())
+    """
+
+    valores = (
+        nombre,
+        correo,
+        password,
+        rol,
+        estado
+    )
+
+    cursor.execute(sql, valores)
+    conexion.commit()
+
+    cursor.close()
+    conexion.close()
+
+    return {
+        "mensaje": "Usuario registrado correctamente"
+    }, 201
+    
+
+@app.route("/api/login",methods=["POST"])
+def login():
+    pass
 
 @app.route("/probar")
 def probar_data():
