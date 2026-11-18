@@ -533,24 +533,76 @@ def obtener_hojasvidaid(id):
     }, 404
 
 
-# LISTAR TODAS LAS HOJAS DE VIDA
-@app.route("/api/hojas-vida")    #reclutador
+# LISTAR TODAS LAS HOJAS DE VIDA COMPLETAS
+@app.route("/api/hojas-vida", methods=["GET"])
 @rol_requerido("reclutador")
 def obtener_hojasvida():
 
     conec = conectar_bd()
     cursor = conec.cursor(dictionary=True)
 
-    # Consultar todos los registros de la base de datos
-    cursor.execute("SELECT * FROM hojas_vida")
+    try:
+        # 1. Consultar todas las hojas de vida
+        cursor.execute("SELECT * FROM hojas_vida")
+        hojas_vida = cursor.fetchall()
 
-    # Obtener todos los registros
-    hojas_vida = cursor.fetchall()
+        # 2. Recorrer todas las hojas de vida
+        for hoja in hojas_vida:
 
-    cursor.close()
-    conec.close()
+            hv_id = hoja["id"]
 
-    return hojas_vida
+            # 3. Consultar estudios
+            cursor.execute("""
+                SELECT *
+                FROM estudios
+                WHERE hoja_vida_id = %s
+            """, (hv_id,))
+
+            hoja["estudios"] = cursor.fetchall()
+
+            # 4. Consultar cursos
+            cursor.execute("""
+                SELECT *
+                FROM cursos
+                WHERE hoja_vida_id = %s
+            """, (hv_id,))
+
+            hoja["cursos"] = cursor.fetchall()
+
+            # 5. Consultar experiencias laborales
+            cursor.execute("""
+                SELECT *
+                FROM experiencias
+                WHERE hoja_vida_id = %s
+            """, (hv_id,))
+
+            experiencias = cursor.fetchall()
+
+            # 6. Consultar las habilidades de cada experiencia
+            for experiencia in experiencias:
+
+                cursor.execute("""
+                    SELECT *
+                    FROM habilidades
+                    WHERE experiencia_id = %s
+                """, (experiencia["id"],))
+
+                experiencia["habilidades"] = cursor.fetchall()
+
+            hoja["experiencias"] = experiencias
+
+        # 7. Devolver todas las hojas de vida completas
+        return jsonify(hojas_vida), 200
+
+    except Exception as e:
+        return jsonify({
+            "mensaje": "Error al consultar las hojas de vida",
+            "error": str(e)
+        }), 500
+
+    finally:
+        cursor.close()
+        conec.close()
 
 
 
