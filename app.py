@@ -37,58 +37,6 @@ def rol_requerido(rol):
 
 
 
-# Verificar permisos y propiedad de los registros usando el token JWT
-# Los reclutadores pueden consultar; los aprendices solo acceden a sus datos.
-def acceso_recurso(tipo):
-    consultas = {
-        "hoja": "SELECT usuario_id FROM hojas_vida WHERE id = %s",
-        "estudio": """SELECT hv.usuario_id FROM estudios e
-                     INNER JOIN hojas_vida hv ON hv.id = e.hoja_vida_id
-                     WHERE e.id = %s""",
-        "curso": """SELECT hv.usuario_id FROM cursos c
-                   INNER JOIN hojas_vida hv ON hv.id = c.hoja_vida_id
-                   WHERE c.id = %s""",
-        "experiencia": """SELECT hv.usuario_id FROM experiencias e
-                         INNER JOIN hojas_vida hv ON hv.id = e.hoja_vida_id
-                         WHERE e.id = %s""",
-        "habilidad": """SELECT hv.usuario_id FROM habilidades h
-                        INNER JOIN experiencias e ON e.id = h.experiencia_id
-                        INNER JOIN hojas_vida hv ON hv.id = e.hoja_vida_id
-                        WHERE h.id = %s"""
-    }
-
-    def decorador(funcion):
-        @wraps(funcion)
-        @jwt_required()
-        def wrapper(*args, **kwargs):
-            rol = get_jwt().get("rol")
-            if rol not in ("aprendiz", "reclutador"):
-                return jsonify({"mensaje": "Rol no autorizado"}), 403
-            if rol == "reclutador" and request.method != "GET":
-                return jsonify({"mensaje": "Solo los aprendices pueden modificar registros"}), 403
-
-            identificador = kwargs.get("hoja_vida_id", kwargs.get("experiencia_id", kwargs.get("id")))
-            if identificador is None:
-                return jsonify({"mensaje": "Falta el identificador"}), 400
-
-            conec = conectar_bd()
-            cursor = conec.cursor()
-            try:
-                cursor.execute(consultas[tipo], (identificador,))
-                resultado = cursor.fetchone()
-            finally:
-                cursor.close()
-                conec.close()
-
-            if resultado is None:
-                return jsonify({"mensaje": "Registro no encontrado"}), 404
-            if rol == "aprendiz" and int(resultado[0]) != int(get_jwt_identity()):
-                return jsonify({"mensaje": "No tienes permiso para acceder a este registro"}), 403
-            return funcion(*args, **kwargs)
-        return wrapper
-    return decorador
-
-
 @app.route("/probar")
 def probar_data():
     conec = conectar_bd()
@@ -114,7 +62,7 @@ def registro_usuario():
     nombre = datos["nombre"].strip()
     correo = datos["correo"].strip().lower()
     password = datos["password"]
-    rol = "aprendiz"  # El registro público solo permite aprendices
+    rol = datos.get("rol", "aprendiz")
 
     # Verificar campos vacíos
     if not nombre or not correo or not password.strip():
@@ -244,10 +192,64 @@ def login():
         cursor.close()
         conexion.close()
 
+#lista lod datos de un solo usuario           
+@app.route("/api/listarhv", methods=["GET"])
+@jwt_required()
+def listar_hojasvida():
+    id = get_jwt_identity()
+    rol = (get_jwt().get("rol") or "").lower()
+
+    conexion = conectar_bd()
+    cursor = conexion.cursor(dictionary=True)
+    try:
+        if rol == "reclutador":
+            cursor.execute("SELECT * FROM hojas_vida")
+            return jsonify(cursor.fetchall()), 200
+
+        if rol == "aprendiz":
+            cursor.execute("""
+                SELECT h.*
+                FROM hojas_vida h
+                JOIN usuarios u ON LOWER(TRIM(u.correo)) = LOWER(TRIM(h.correo))
+                WHERE u.id = %s
+            """, (id,))
+            hojas_vida = cursor.fetchone()
+
+            if not hojas_vida:
+                return jsonify({"Mensaje": "No tienes hoja de vida registrada"}), 404
+
+            hv_id = hojas_vida["id"]
+
+            cursor.execute("SELECT * FROM estudios WHERE hoja_vida_id = %s", (hv_id,))
+            estudios = cursor.fetchall()
+
+            cursor.execute("SELECT * FROM cursos WHERE hoja_vida_id = %s", (hv_id,))
+            cursos = cursor.fetchall()
+
+            cursor.execute("SELECT * FROM experiencias WHERE hoja_vida_id = %s", (hv_id,))
+            experiencias = cursor.fetchall()
+
+            # Cada experiencia lleva sus habilidades
+            for exp in experiencias:
+                cursor.execute("SELECT * FROM habilidades WHERE experiencia_id = %s", (exp["id"],))
+                exp["habilidades"] = cursor.fetchall()
+
+            return jsonify({
+                "Datos_personales": hojas_vida,
+                "Estudios": estudios,
+                "Cursos": cursos,
+                "Experiencias": experiencias
+            }), 200
+
+        return jsonify({"Mensaje": "Rol no autorizado"}), 403
+    finally:
+        cursor.close()
+        conexion.close()
+
 
 #Actualizar hoja de vida por medio del id
 @app.route("/api/actualizarhv/<int:id>", methods=["PUT"])
-@acceso_recurso("hoja")
+@jwt_required()
 def actualizarhv(id):
 
     # Recibir los datos enviados
@@ -324,7 +326,7 @@ def actualizarhv(id):
 
 # Eliminar hoja de vida por id
 @app.route("/api/eliminarhv/<int:id>", methods=["DELETE"])
-@acceso_recurso("hoja")
+@jwt_required()
 def eliminar_hv(id):
     conec = conectar_bd()
     cursor = conec.cursor()
@@ -351,7 +353,7 @@ def eliminar_hv(id):
 
 #Consultar hoja de vida por id
 @app.route("/api/consultahv/<int:id>", methods=["GET"])
-@acceso_recurso("hoja")
+@jwt_required()
 def obtener_hvida(id):
     conec = conectar_bd()
     cursor = conec.cursor(dictionary=True)
@@ -378,25 +380,10 @@ def obtener_hvida(id):
 @jwt_required()
 def registrar_hojavida():
     
-    # Obtener el usuario autenticado desde el token JWT
-    usuario_id = int(get_jwt_identity())
-    if get_jwt().get("rol") != "aprendiz":
-        return jsonify({"mensaje": "Solo los aprendices pueden registrar HV"}), 403
-
-    datos = request.get_json(silent=True) or {}
-    obligatorios = ("nombre", "edad", "ciudad", "correo", "programa", "ficha", "jornada")
-    if any(datos.get(campo) is None or str(datos[campo]).strip() == "" for campo in obligatorios):
-        return jsonify({"mensaje": "Faltan campos obligatorios de la hoja de vida"}), 400
 
     conec = conectar_bd()
     cursor = conec.cursor()
-
-    # Verificar si el aprendiz ya tiene una hoja de vida
-    cursor.execute("SELECT id FROM hojas_vida WHERE usuario_id = %s", (usuario_id,))
-    if cursor.fetchone():
-        cursor.close()
-        conec.close()
-        return {"mensaje": "Ya tienes una hoja de vida registrada"}, 400
+    datos = request.get_json()
 
     # Consultar si el correo ya existe en la base de datos
     cursor.execute(
@@ -416,17 +403,16 @@ def registrar_hojavida():
 
     sql = """
         INSERT INTO hojas_vida
-        (usuario_id, nombre, edad, ciudad, correo, fotografia, programa, ficha, jornada)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        (nombre, edad, ciudad, correo, fotografia, programa, ficha, jornada)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     cursor.execute(sql, (
-        usuario_id,
         datos['nombre'],
         datos['edad'],
         datos['ciudad'],
         datos['correo'],
-        datos.get('fotografia'),
+        datos['fotografia'],
         datos['programa'],
         datos['ficha'],
         datos['jornada']
@@ -446,8 +432,9 @@ def registrar_hojavida():
     }, 201
 
 
+
 # CONSULTAR MI HOJA DE VIDA CON EL TOKEN JWT
-@app.route("/api/mi-hoja-vida", methods=["GET"])
+@app.route("/api/mi-hoja-vida", methods=["GET"]) 
 @jwt_required()
 def mi_hoja_vida():
     # Obtener el id del usuario desde el token
@@ -508,14 +495,21 @@ def mi_hoja_vida():
         conec.close()
 
 
+
+
+
+
+
+
+
+
 @app.route("/")
 def inicio():
     return "Api hoja de vida funcionando"
 
 
 # BUSCAR UNA HOJA DE VIDA POR ID
-@app.route("/api/hojas-vida/<int:id>")
-@acceso_recurso("hoja")
+@app.route("/api/hojas-vida/<int:id>") 
 def obtener_hojasvidaid(id):
 
     conec = conectar_bd()
@@ -540,7 +534,7 @@ def obtener_hojasvidaid(id):
 
 
 # LISTAR TODAS LAS HOJAS DE VIDA
-@app.route("/api/hojas-vida")
+@app.route("/api/hojas-vida")    #reclutador
 @rol_requerido("reclutador")
 def obtener_hojasvida():
 
@@ -565,7 +559,7 @@ def obtener_hojasvida():
 
 #Consultar todos los estudios asociados a una hoja de vida.
 @app.route("/api/hojasvida/<int:hoja_vida_id>/estudios", methods=["GET"])
-@acceso_recurso("hoja")
+@rol_requerido("reclutador")
 def consultar_estudios(hoja_vida_id):
 
     conec = conectar_bd()
@@ -589,7 +583,6 @@ def consultar_estudios(hoja_vida_id):
 
 #Registrar un nuevo esstudio 
 @app.route("/api/hojasvida/<int:hoja_vida_id>/estudios", methods=["POST"])
-@acceso_recurso("hoja")
 def registrar_estudio(hoja_vida_id):
 
     datos = request.get_json()
@@ -628,16 +621,14 @@ def registrar_estudio(hoja_vida_id):
 
 #Consultar un estudio especifico 
 @app.route("/api/estudios/<int:id>", methods=["GET"])
-@acceso_recurso("estudio")
+@jwt_required()
 def consultar_estudio(id):
 
     conec = conectar_bd()
     cursor = conec.cursor(dictionary=True)
 
     sql = """
-        SELECT id, hoja_vida_id, nivel, institucion, titulo, anio_graduacion
-        FROM estudios
-        WHERE id = %s
+        SELECT * FROM estudios WHERE id = %s
     """
 
     cursor.execute(sql, (id,))
@@ -658,7 +649,6 @@ def consultar_estudio(id):
 #Actualizar un estudio
 
 @app.route("/api/actualizarestudios/<int:id>", methods=["PUT"])
-@acceso_recurso("estudio")
 def actualizar_estudio(id):
 
     datos = request.json
@@ -709,7 +699,6 @@ def actualizar_estudio(id):
     
     # Eliminar estudio por id
 @app.route("/api/eliminarestudio/<int:id>", methods=["DELETE"])
-@acceso_recurso("estudio")
 def eliminar_estudio(id):
     conec = conectar_bd()
     cursor = conec.cursor()
@@ -736,7 +725,6 @@ def eliminar_estudio(id):
 #Consultar todas las experiencias laborales asociadas a una hoja de vida.
 
 @app.route("/api/hojasvida/<int:hoja_vida_id>/experiencias", methods=["GET"])
-@acceso_recurso("hoja")
 def consultar_experiencias(hoja_vida_id):
 
     conec = conectar_bd()
@@ -761,7 +749,6 @@ def consultar_experiencias(hoja_vida_id):
 
 # Registrar una nueva experiencia laboral
 @app.route("/api/hojasvida/<int:hoja_vida_id>/experiencias", methods=["POST"])
-@acceso_recurso("hoja")
 def registrar_experiencia(hoja_vida_id):
 
     datos = request.get_json()
@@ -802,7 +789,6 @@ def registrar_experiencia(hoja_vida_id):
     
     # Actualizar una experiencia laboral
 @app.route("/api/actualizarexperiencia/<int:id>", methods=["PUT"])
-@acceso_recurso("experiencia")
 def actualizar_experiencia(id):
 
     datos = request.json
@@ -854,7 +840,6 @@ def actualizar_experiencia(id):
 
 # Eliminar experiencia por id
 @app.route("/api/eliminarexperiencia/<int:id>", methods=["DELETE"])
-@acceso_recurso("experiencia")
 def eliminar_experiencia(id):
 
     conec = conectar_bd()
@@ -897,7 +882,6 @@ def eliminar_experiencia(id):
 
 # Consultar todas las habilidades asociadas a una experiencia
 @app.route("/api/experiencias/<int:experiencia_id>/habilidades", methods=["GET"])
-@acceso_recurso("experiencia")
 def consultar_habilidades(experiencia_id):
 
     conec = conectar_bd()
@@ -923,31 +907,12 @@ def consultar_habilidades(experiencia_id):
 # Registrar una nueva habilidad
 
 @app.route("/api/experiencias/<int:experiencia_id>/habilidades", methods=["POST"])
-@jwt_required()
 def registrar_habilidad(experiencia_id):
 
-    usuario_id = int(get_jwt_identity())
-    if get_jwt().get("rol") != "aprendiz":
-        return jsonify({"mensaje": "No tienes permiso"}), 403
-
-    datos = request.get_json() or {}
-    if not datos.get("nombre"):
-        return jsonify({"mensaje": "El nombre es obligatorio"}), 400
+    datos = request.get_json()
 
     conec = conectar_bd()
     cursor = conec.cursor()
-
-    # Verificar que la experiencia pertenece al aprendiz
-    cursor.execute("""
-        SELECT e.id
-        FROM experiencias e
-        INNER JOIN hojas_vida hv ON hv.id = e.hoja_vida_id
-        WHERE e.id = %s AND hv.usuario_id = %s
-    """, (experiencia_id, usuario_id))
-    if not cursor.fetchone():
-        cursor.close()
-        conec.close()
-        return jsonify({"mensaje": "Experiencia no encontrada"}), 404
 
     sql = """
         INSERT INTO habilidades
@@ -978,7 +943,6 @@ def registrar_habilidad(experiencia_id):
     
     # Actualizar una habilidad
 @app.route("/api/actualizarhabilidad/<int:id>", methods=["PUT"])
-@acceso_recurso("habilidad")
 def actualizar_habilidad(id):
 
     datos = request.json
@@ -1025,7 +989,6 @@ def actualizar_habilidad(id):
     
     # Eliminar habilidad por id
 @app.route("/api/eliminarhabilidad/<int:id>", methods=["DELETE"])
-@acceso_recurso("habilidad")
 def eliminar_habilidad(id):
 
     conec = conectar_bd()
@@ -1067,7 +1030,6 @@ def eliminar_habilidad(id):
 
 # Consultar todos los cursos asociados a una hoja de vida
 @app.route("/api/hojasvida/<int:hoja_vida_id>/cursos", methods=["GET"])
-@acceso_recurso("hoja")
 def consultar_cursos(hoja_vida_id):
 
     conec = conectar_bd()
@@ -1092,7 +1054,6 @@ def consultar_cursos(hoja_vida_id):
 
 # Registrar un nuevo curso
 @app.route("/api/hojasvida/<int:hoja_vida_id>/cursos", methods=["POST"])
-@acceso_recurso("hoja")
 def registrar_curso(hoja_vida_id):
 
     datos = request.get_json()
@@ -1129,7 +1090,6 @@ def registrar_curso(hoja_vida_id):
 
 # Consultar un curso específico
 @app.route("/api/cursos/<int:id>", methods=["GET"])
-@acceso_recurso("curso")
 def consultar_curso(id):
 
     conec = conectar_bd()
@@ -1158,7 +1118,6 @@ def consultar_curso(id):
 
 # Actualizar un curso
 @app.route("/api/actualizarcurso/<int:id>", methods=["PUT"])
-@acceso_recurso("curso")
 def actualizar_curso(id):
 
     datos = request.json
@@ -1205,7 +1164,6 @@ def actualizar_curso(id):
     
     # Eliminar curso por id
 @app.route("/api/eliminarcurso/<int:id>", methods=["DELETE"])
-@acceso_recurso("curso")
 def eliminar_curso(id):
 
     conec = conectar_bd()
@@ -1244,7 +1202,6 @@ def eliminar_curso(id):
     # CONSULTA COMPLETA DE LA HOJA DE VIDA
 
 @app.route("/api/hojasvida/<int:id>/completa", methods=["GET"])
-@acceso_recurso("hoja")
 def consultar_hoja_vida_completa(id):
 
     conec = conectar_bd()
